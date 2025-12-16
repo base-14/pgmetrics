@@ -1,5 +1,5 @@
 /*
- * Copyright 2024 RapidLoop, Inc.
+ * Copyright 2025 RapidLoop, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -52,6 +52,7 @@ const (
 	pgv15 = 15_00_00
 	pgv16 = 16_00_00
 	pgv17 = 17_00_00
+	pgv18 = 18_00_00
 )
 
 // See https://www.postgresql.org/docs/current/static/libpq-connect.html#LIBPQ-CONNSTRING
@@ -517,7 +518,9 @@ func (c *collector) collectCluster(o CollectConfig) {
 
 	c.getLocks()
 
-	if c.version >= pgv14 {
+	if c.version >= pgv18 {
+		c.getWALv18()
+	} else if c.version >= pgv14 {
 		c.getWAL()
 	}
 
@@ -1376,7 +1379,8 @@ func (c *collector) getDatabases(fillSize, onlyListed bool, dbList []string) {
 			COALESCE(EXTRACT(EPOCH FROM S.stats_reset)::bigint, 0),
 			@checksum_failures@, @checksum_last_failure@,
 			S.session_time, S.active_time, S.idle_in_transaction_time,
-			S.sessions, S.sessions_abandoned, S.sessions_fatal, S.sessions_killed
+			S.sessions, S.sessions_abandoned, S.sessions_fatal, S.sessions_killed,
+			S.parallel_workers_to_launch, S.parallel_workers_launched
 		  FROM pg_database AS D JOIN pg_stat_database AS S
 			ON D.oid = S.datid
 		  WHERE (NOT D.datistemplate) @only@
@@ -1413,6 +1417,11 @@ func (c *collector) getDatabases(fillSize, onlyListed bool, dbList []string) {
 		q = strings.Replace(q, `S.sessions_fatal`, `0`, 1)
 		q = strings.Replace(q, `S.sessions_killed`, `0`, 1)
 	}
+	if c.version < pgv18 {
+		// these columns only in pg >= 18
+		q = strings.Replace(q, `S.parallel_workers_to_launch`, `0`, 1)
+		q = strings.Replace(q, `S.parallel_workers_launched`, `0`, 1)
+	}
 
 	// do the query
 	rows, err := c.db.QueryContext(ctx, q, args...)
@@ -1432,7 +1441,8 @@ func (c *collector) getDatabases(fillSize, onlyListed bool, dbList []string) {
 			&d.BlkReadTime, &d.BlkWriteTime, &d.StatsReset, &d.ChecksumFailures,
 			&d.ChecksumLastFailure, &d.SessionTime, &d.ActiveTime,
 			&d.IdleInTxTime, &d.Sessions, &d.SessionsAbandoned,
-			&d.SessionsFatal, &d.SessionsKilled); err != nil {
+			&d.SessionsFatal, &d.SessionsKilled, &d.ParallelWorkersToLaunch,
+			&d.ParallelWorkersLaunched); err != nil {
 			log.Fatalf("pg_stat_database query failed: %v", err)
 		}
 		d.Size = -1 // will be filled in later if asked for
@@ -1538,7 +1548,8 @@ func (c *collector) getTablesNoRetry(fillSize bool) error {
 			C.relispartition, C.reltablespace, COALESCE(array_to_string(C.relacl, E'\n'), ''),
 			S.n_ins_since_vacuum,
 			@last_seq_scan@, @last_idx_scan@, @n_tup_newpage_upd@,
-            CASE WHEN $1 THEN COALESCE(pg_table_size(S.relid), -1) ELSE -1 END
+            CASE WHEN $1 THEN COALESCE(pg_table_size(S.relid), -1) ELSE -1 END,
+            @total_times@
 		  FROM pg_stat_user_tables AS S
 			JOIN pg_statio_user_tables AS IO
 			ON S.relid = IO.relid
@@ -1563,6 +1574,13 @@ func (c *collector) getTablesNoRetry(fillSize bool) error {
 		q = strings.Replace(q, "@last_idx_scan@", "COALESCE(EXTRACT(EPOCH FROM S.last_idx_scan)::bigint, 0)", 1)
 		q = strings.Replace(q, "@n_tup_newpage_upd@", "COALESCE(S.n_tup_newpage_upd, 0)", 1)
 	}
+	if c.version < pgv18 { // total_{auto,}{analyze,vacuum}_time only in pg >= 18
+		q = strings.Replace(q, "@total_times@", "0, 0, 0, 0", 1)
+	} else {
+		q = strings.Replace(q, "@total_times@",
+			"S.total_vacuum_time, S.total_autovacuum_time, S.total_analyze_time, S.total_autoanalyze_time",
+			1)
+	}
 	rows, err := c.db.QueryContext(ctx, q, fillSize)
 	if err != nil {
 		return err
@@ -1583,7 +1601,8 @@ func (c *collector) getTablesNoRetry(fillSize bool) error {
 			&t.RelKind, &t.RelPersistence, &t.RelNAtts, &t.AgeRelFrozenXid,
 			&t.RelIsPartition, &tblspcOID, &t.ACL, &t.NInsSinceVacuum,
 			&t.LastSeqScan, &t.LastIdxScan, &t.NTupNewpageUpd,
-			&t.Size); err != nil {
+			&t.Size, &t.TotalVacuumTime, &t.TotalAutovacuumTime,
+			&t.TotalAnalyzeTime, &t.TotalAutoanalyzeTime); err != nil {
 			return err
 		}
 		t.Bloat = -1 // will be filled in later
@@ -1779,9 +1798,15 @@ func (c *collector) getVacuumProgressv17() {
 			COALESCE(heap_blks_vacuumed, 0), COALESCE(index_vacuum_count, 0),
 			COALESCE(max_dead_tuple_bytes, 0), COALESCE(dead_tuple_bytes, 0),
 			COALESCE(num_dead_item_ids, 0), COALESCE(indexes_total, 0),
-			COALESCE(indexes_processed, 0)
+			COALESCE(indexes_processed, 0), @delay_time@
 		  FROM pg_stat_progress_vacuum
 		  ORDER BY pid ASC`
+	if c.version < pgv18 { // delay_time only in pg >= 18
+		q = strings.Replace(q, "@delay_time@", "0", 1)
+	} else {
+		q = strings.Replace(q, "@delay_time@", "COALESCE(delay_time, 0)", 1)
+	}
+
 	rows, err := c.db.QueryContext(ctx, q)
 	if err != nil {
 		log.Fatalf("pg_stat_progress_vacuum query failed: %v", err)
@@ -1793,7 +1818,7 @@ func (c *collector) getVacuumProgressv17() {
 		if err := rows.Scan(&p.PID, &p.DBName, &p.TableOID, &p.Phase, &p.HeapBlksTotal,
 			&p.HeapBlksScanned, &p.HeapBlksVacuumed, &p.IndexVacuumCount,
 			&p.MaxDeadTupleBytes, &p.DeadTupleBytes, &p.NumDeadItemIDs,
-			&p.IndexesTotal, &p.IndexesProcessed); err != nil {
+			&p.IndexesTotal, &p.IndexesProcessed, &p.DelayTime); err != nil {
 			log.Fatalf("pg_stat_progress_vacuum query failed: %v", err)
 		}
 		if t := c.result.TableByOID(p.TableOID); t != nil {
@@ -2028,7 +2053,9 @@ func (c *collector) getStatements(currdb string) {
 
 	// Collect based on pss version, not pg version. This allows for cases when
 	// postgres is upgraded, but not the extension.
-	if semver.Compare(version, "v1.11") >= 0 { // pg v17
+	if semver.Compare(version, "v1.12") >= 0 { // pg v18
+		c.getStatementsv112(schema)
+	} else if semver.Compare(version, "v1.11") >= 0 { // pg v17
 		c.getStatementsv111(schema)
 	} else if semver.Compare(version, "v1.10") >= 0 { // pg v15, pg v16
 		c.getStatementsv110(schema)
@@ -2038,6 +2065,79 @@ func (c *collector) getStatements(currdb string) {
 		c.getStatementsv18(schema)
 	} else {
 		c.getStatementsPrev18(schema)
+	}
+}
+
+func (c *collector) getStatementsv112(schema string) {
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+
+	q := `SELECT userid, dbid, queryid, LEFT(COALESCE(query, ''), $1), calls,
+			total_exec_time, min_exec_time, max_exec_time, stddev_exec_time,
+			rows, shared_blks_hit, shared_blks_read, shared_blks_dirtied,
+			shared_blks_written, local_blks_hit, local_blks_read,
+			local_blks_dirtied, local_blks_written, temp_blks_read,
+			temp_blks_written, shared_blk_read_time, shared_blk_write_time,
+			plans, total_plan_time, min_plan_time, max_plan_time,
+			stddev_plan_time, wal_records, wal_fpi, wal_bytes::bigint,
+			toplevel, temp_blk_read_time, temp_blk_write_time,
+			jit_functions, jit_generation_time, jit_inlining_count,
+			jit_inlining_time, jit_optimization_count, jit_optimization_time,
+			jit_emission_count, jit_emission_time, local_blk_read_time,
+			local_blk_write_time, jit_deform_count, jit_deform_time,
+			stats_since, minmax_stats_since, wal_buffers_full,
+			parallel_workers_to_launch, parallel_workers_launched
+		  FROM @schema@.pg_stat_statements
+		  ORDER BY total_exec_time DESC
+		  LIMIT $2`
+	q = strings.Replace(q, "@schema@", schema, -1)
+	rows, err := c.db.QueryContext(ctx, q, c.sqlLength, c.stmtsLimit)
+	if err != nil {
+		log.Printf("warning: pg_stat_statements query failed: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	c.result.Statements = make([]pgmetrics.Statement, 0, c.stmtsLimit)
+	for rows.Next() {
+		var s pgmetrics.Statement
+		var queryID sql.NullInt64
+		var statsSince, minMaxStatsSince time.Time
+		if err := rows.Scan(&s.UserOID, &s.DBOID, &queryID, &s.Query,
+			&s.Calls, &s.TotalTime, &s.MinTime, &s.MaxTime, &s.StddevTime,
+			&s.Rows, &s.SharedBlksHit, &s.SharedBlksRead, &s.SharedBlksDirtied,
+			&s.SharedBlksWritten, &s.LocalBlksHit, &s.LocalBlksRead,
+			&s.LocalBlksDirtied, &s.LocalBlksWritten, &s.TempBlksRead,
+			&s.TempBlksWritten, &s.BlkReadTime, &s.BlkWriteTime, &s.Plans,
+			&s.TotalPlanTime, &s.MinPlanTime, &s.MaxPlanTime, &s.StddevPlanTime,
+			&s.WALRecords, &s.WALFPI, &s.WALBytes, &s.TopLevel,
+			&s.TempBlkReadTime, &s.TempBlkWriteTime, &s.JITFuntions,
+			&s.JITGenerationTime, &s.JITInliningCount, &s.JITInliningTime,
+			&s.JITOptimizationCount, &s.JITOptimizationTime, &s.JITEmissionCount,
+			&s.JITEmissionTime, &s.LocalBlkReadTime, &s.LocalBlkWriteTime,
+			&s.JITDeformCount, &s.JITDeformTime, &statsSince, &minMaxStatsSince,
+			&s.WALBuffersFull, &s.ParallelWorkersToLaunch, &s.ParallelWorkersLaunched,
+		); err != nil {
+			log.Fatalf("pg_stat_statements scan failed: %v", err)
+		}
+		// UserName
+		if r := c.result.RoleByOID(s.UserOID); r != nil {
+			s.UserName = r.Name
+		}
+		// DBName
+		if d := c.result.DatabaseByOID(s.DBOID); d != nil {
+			s.DBName = d.Name
+		}
+		// Query ID, set to 0 if null
+		s.QueryID = queryID.Int64
+		// StatsSince
+		s.StatsSince = statsSince.Unix()
+		// MinMaxStatsSince
+		s.MinMaxStatsSince = minMaxStatsSince.Unix()
+		c.result.Statements = append(c.result.Statements, s)
+	}
+	if err := rows.Err(); err != nil {
+		log.Fatalf("pg_stat_statements failed: %v", err)
 	}
 }
 
@@ -2822,6 +2922,33 @@ func (c *collector) getWAL() {
 	c.result.WAL = &w
 }
 
+func (c *collector) getWALv18() {
+	// skip if Aurora, because the function errors out with:
+	// "Function pg_stat_get_wal() is currently not supported for Aurora"
+	if c.isAWSAurora() {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+
+	// In PostgreSQL 18, wal_write, wal_sync, wal_write_time, wal_sync_time
+	// columns were removed from pg_stat_wal and moved to pg_stat_io
+	// pg_stat_wal has only 1 row
+	q := `SELECT wal_records, wal_fpi, wal_bytes, wal_buffers_full,
+			     COALESCE(EXTRACT(EPOCH FROM stats_reset)::bigint, 0)
+		  FROM   pg_stat_wal
+		  LIMIT  1`
+
+	var w pgmetrics.WAL
+	err := c.db.QueryRowContext(ctx, q).Scan(&w.Records, &w.FPI, &w.Bytes,
+		&w.BuffersFull, &w.StatsReset)
+	if err != nil {
+		log.Fatalf("pg_stat_wal query failed: %v", err)
+	}
+	c.result.WAL = &w
+}
+
 func (c *collector) getProgressAnalyze() {
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
@@ -2833,9 +2960,15 @@ func (c *collector) getProgressAnalyze() {
 				 COALESCE(ext_stats_computed, 0::bigint),
 				 COALESCE(child_tables_total, 0::bigint),
 				 COALESCE(child_tables_done, 0::bigint),
-				 COALESCE(current_child_table_relid::int, 0::int)
+				 COALESCE(current_child_table_relid::int, 0::int),
+				 @delay_time@
 		    FROM pg_stat_progress_analyze
 		ORDER BY pid ASC`
+	if c.version < pgv18 { // delay_time only in pg >= 18
+		q = strings.Replace(q, "@delay_time@", "0", 1)
+	} else {
+		q = strings.Replace(q, "@delay_time@", "COALESCE(delay_time, 0)", 1)
+	}
 
 	rows, err := c.db.QueryContext(ctx, q)
 	if err != nil {
@@ -2850,7 +2983,7 @@ func (c *collector) getProgressAnalyze() {
 		if err := rows.Scan(&r.PID, &r.DBName, &r.TableOID, &r.Phase,
 			&r.SampleBlocksTotal, &r.SampleBlocksScanned, &r.ExtStatsTotal,
 			&r.ExtStatsComputed, &r.ChildTablesTotal, &r.ChildTablesDone,
-			&r.CurrentChildTableRelOID); err != nil {
+			&r.CurrentChildTableRelOID, &r.DelayTime); err != nil {
 			log.Fatalf("pg_stat_progress_analyze query scan failed: %v", err)
 		}
 		out = append(out, r)
@@ -3022,13 +3155,19 @@ func (c *collector) getCheckpointer() {
 
 	q := `SELECT num_timed, num_requested, restartpoints_timed,
 				restartpoints_req, restartpoints_done, write_time, sync_time,
-				buffers_written, COALESCE(EXTRACT(EPOCH FROM stats_reset)::bigint, 0)
+				buffers_written, COALESCE(EXTRACT(EPOCH FROM stats_reset)::bigint, 0),
+				num_done, slru_written
 		    FROM pg_stat_checkpointer`
+	if c.version < pgv18 { // num_done and slru_written only in pg >= v18
+		q = strings.Replace(q, "num_done", "0", 1)
+		q = strings.Replace(q, "slru_written", "0", 1)
+	}
 
 	var ckp pgmetrics.Checkpointer
 	err := c.db.QueryRowContext(ctx, q).Scan(&ckp.NumTimed, &ckp.NumRequested,
 		&ckp.RestartpointsTimed, &ckp.RestartpointsRequested, &ckp.RestartpointsDone,
-		&ckp.WriteTime, &ckp.SyncTime, &ckp.BuffersWritten, &ckp.StatsReset)
+		&ckp.WriteTime, &ckp.SyncTime, &ckp.BuffersWritten, &ckp.StatsReset,
+		&ckp.NumDone, &ckp.SLRUWritten)
 	if err != nil {
 		log.Fatalf("pg_stat_checkpointer query failed: %v", err)
 	}

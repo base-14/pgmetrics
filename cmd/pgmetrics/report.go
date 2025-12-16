@@ -1,5 +1,5 @@
 /*
- * Copyright 2024 RapidLoop, Inc.
+ * Copyright 2025 RapidLoop, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -293,8 +293,8 @@ Logical Replication Slots:
 
 // WAL files and archiving
 func reportWAL(fd io.Writer, result *pgmetrics.Model, version int) {
-
-	archiveMode := getSetting(result, "archive_mode") == "on"
+	mode := getSetting(result, "archive_mode")
+	archiveMode := (mode == "on" || mode == "always")
 	fmt.Fprintf(fd, `
 WAL Files:
     WAL Archiving?       %s`,

@@ -1,5 +1,5 @@
 /*
- * Copyright 2024 RapidLoop, Inc.
+ * Copyright 2025 RapidLoop, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package pgmetrics
 // ModelSchemaVersion is the schema version of the "Model" data structure
 // defined below. It is in the "semver" notation. Version history:
 //
+//	1.19 - Postgres 18 support
 //	1.18 - Add schema name for extensions
 //	1.17 - Raw log entries, Postgres 17 support
 //	1.16 - Postgres 16 support
@@ -39,7 +40,7 @@ package pgmetrics
 //	1.2 - more table and index attributes
 //	1.1 - added NotificationQueueUsage and Statements
 //	1.0 - initial release
-const ModelSchemaVersion = "1.18"
+const ModelSchemaVersion = "1.19"
 
 // Model contains the entire information collected by a single run of
 // pgmetrics. It can be converted to and from json without loss of
@@ -398,6 +399,9 @@ type Database struct {
 	SessionsAbandoned   int64   `json:"sessions_abandoned,omitempty"`       // pg >= v14
 	SessionsFatal       int64   `json:"sessions_fatal,omitempty"`           // pg >= v14
 	SessionsKilled      int64   `json:"sessions_killed,omitempty"`          // pg >= v14
+	// following fields present only in schema 1.19 and later
+	ParallelWorkersToLaunch int64 `json:"parallel_workers_to_launch,omitempty"` // pg >= v18
+	ParallelWorkersLaunched int64 `json:"parallel_workers_launched,omitempty"`  // pg >= v18
 }
 
 type Table struct {
@@ -451,6 +455,11 @@ type Table struct {
 	LastSeqScan    int64 `json:"last_seq_scan,omitempty"`     // pg >= v16
 	LastIdxScan    int64 `json:"last_idx_scan,omitempty"`     // pg >= v16
 	NTupNewpageUpd int64 `json:"n_tup_newpage_upd,omitempty"` // pg >= v16
+	// following fields present only in schema 1.19 and later
+	TotalVacuumTime      float64 `json:"total_vacuum_time,omitempty"`      // millisecs, pg >= v18
+	TotalAutovacuumTime  float64 `json:"total_autovacuum_time,omitempty"`  // millisecs, pg >= v18
+	TotalAnalyzeTime     float64 `json:"total_analyze_time,omitempty"`     // millisecs, pg >= v18
+	TotalAutoanalyzeTime float64 `json:"total_autoanalyze_time,omitempty"` // millisecs, pg >= v18
 }
 
 type Index struct {
@@ -520,6 +529,8 @@ type VacuumProgressBackend struct {
 	NumDeadItemIDs    int64 `json:"num_dead_item_ids,omitempty"` // pg >= v17
 	IndexesTotal      int64 `json:"indexes_total,omitempty"`     // pg >= v17
 	IndexesProcessed  int64 `json:"indexes_processed,omitempty"` // pg >= v17
+	// following fields present only in schema 1.19 and later
+	DelayTime float64 `json:"delay_time,omitempty"` // millisecs, pg >= v18
 }
 
 type Extension struct {
@@ -672,6 +683,10 @@ type Statement struct {
 	JITDeformTime        float64 `json:"jit_deform_time,omitempty"`        // pg >= v17
 	StatsSince           int64   `json:"stats_since,omitempty"`            // pg >= v17
 	MinMaxStatsSince     int64   `json:"minmax_stats_since,omitempty"`     // pg >= v17
+	// following fields present only in schema 1.19 and later
+	WALBuffersFull          int64 `json:"wal_buffers_full,omitempty"`           // pg >= v18
+	ParallelWorkersToLaunch int64 `json:"parallel_workers_to_launch,omitempty"` // pg >= v18
+	ParallelWorkersLaunched int64 `json:"parallel_workers_launched,omitempty"`  // pg >= v18
 }
 
 // Publication represents a single v10+ publication. Added in schema 1.2.
@@ -936,10 +951,10 @@ type WAL struct {
 	FPI         int64   `json:"fpi"`
 	Bytes       int64   `json:"bytes"`
 	BuffersFull int64   `json:"buffers_full"`
-	Write       int64   `json:"write"`
-	Sync        int64   `json:"sync"`
-	WriteTime   float64 `json:"write_time"` // in milliseconds
-	SyncTime    float64 `json:"sync_time"`  // in milliseconds
+	Write       int64   `json:"write"`      // 0 in pg >= 18
+	Sync        int64   `json:"sync"`       // 0 in pg >= 18
+	WriteTime   float64 `json:"write_time"` // in milliseconds, 0 in pg >= 18
+	SyncTime    float64 `json:"sync_time"`  // in milliseconds, 0 in pg >= 18
 	StatsReset  int64   `json:"stats_reset"`
 }
 
@@ -968,6 +983,8 @@ type AnalyzeProgressBackend struct {
 	ChildTablesTotal        int64  `json:"child_tables_total"`
 	ChildTablesDone         int64  `json:"child_tables_done"`
 	CurrentChildTableRelOID int    `json:"child_oid"`
+	// following fields present only in schema 1.19 and later
+	DelayTime float64 `json:"delay_time,omitempty"` // millisecs, pg >= v18
 }
 
 // BasebackupProgressBackend represents a row (and each row represents one
@@ -1139,4 +1156,7 @@ type Checkpointer struct {
 	SyncTime               float64 `json:"sync_time"`
 	BuffersWritten         int64   `json:"buffers_written"`
 	StatsReset             int64   `json:"stats_reset"`
+	// following fields present only in schema 1.19 and later
+	NumDone     int64 `json:"num_done,omitempty"`     // pg >= v18
+	SLRUWritten int64 `json:"slru_written,omitempty"` // pg >= v18
 }
