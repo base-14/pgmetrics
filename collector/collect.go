@@ -35,7 +35,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/rapidloop/pgmetrics"
+	"github.com/base-14/pgmetrics"
 	"golang.org/x/mod/semver"
 )
 
@@ -741,7 +741,7 @@ func (c *collector) getLocal() {
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
 
-	// see also https://github.com/rapidloop/pgmetrics/issues/39
+	// see also https://github.com/base-14/pgmetrics/issues/39
 	q := `SELECT COALESCE(inet_client_addr() = inet_server_addr(), TRUE)
 			OR (inet_server_addr() << '127.0.0.0/8' AND inet_client_addr() << '127.0.0.0/8')`
 	if err := c.db.QueryRowContext(ctx, q).Scan(&c.local); err != nil {

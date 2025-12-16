@@ -26,7 +26,7 @@ import (
 	"time"
 
 	humanize "github.com/dustin/go-humanize"
-	"github.com/rapidloop/pgmetrics"
+	"github.com/base-14/pgmetrics"
 )
 
 // Postgres version constants

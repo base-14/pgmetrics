@@ -1,4 +1,4 @@
-module github.com/rapidloop/pgmetrics
+module github.com/base-14/pgmetrics
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.7.0
